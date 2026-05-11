@@ -129,7 +129,6 @@ type testPod struct {
 	nodeGWIP      string
 	podName       string
 	podIP         string
-	hostNetwork   bool
 	podMAC        string
 	namespace     string
 	portName      string
