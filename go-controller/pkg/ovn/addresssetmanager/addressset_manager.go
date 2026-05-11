@@ -53,7 +53,7 @@ type podSelectorAddressSet struct {
 
 	// selectedNamespaces is a cache for namespaces that were selected by this address set during the last reconciliation
 	// used to optimize events processing.
-	selectedNamespaces *selectedNamespaces
+	selectedNamespaces sets.Set[string]
 	// selectedNodes is a cache for nodes that were selected by this address set during the last reconciliation
 	// used to optimize node event processing. Only set when nodeSelector is non-nil.
 	selectedNodes sets.Set[string]
@@ -274,11 +274,6 @@ func (m *AddressSetManager) EnsureAddressSet(podSelector, namespaceSelector, nod
 				controllerName:    controllerName,
 				netInfo:           netInfo,
 				legacyNetpolMode:  legacyNetpolMode,
-				selectedNamespaces: &selectedNamespaces{
-					set: sets.New[string](),
-					// until the first reconcile, we assume all namespaces are selected to avoid missing any updates
-					all: true,
-				},
 			}
 			m.addressSets.LoadOrStore(key, psAddrSet)
 			// this only puts key to the queue, no lock
@@ -482,14 +477,14 @@ func (m *AddressSetManager) reconcileNamespace(nsKey string) error {
 			if err != nil {
 				return err
 			}
-			if currentlyMatchedNamespaces.Has(nsKey) {
+			if currentlyMatchedNamespaces == nil || currentlyMatchedNamespaces.Has(nsKey) {
 				// this namespace is relevant for this address set, reconcile
 				m.addressSetReconciler.Reconcile(addrSetKey)
 				return nil
 			}
 			// now check if this address set was matching this namespace before, if yes, reconcile since it might not match anymore
 			previouslyMatchedNamespaces := addrSet.selectedNamespaces
-			if previouslyMatchedNamespaces.Has(nsKey) {
+			if previouslyMatchedNamespaces == nil || previouslyMatchedNamespaces.Has(nsKey) {
 				m.addressSetReconciler.Reconcile(addrSetKey)
 				return nil
 			}
@@ -699,7 +694,7 @@ func (m *AddressSetManager) reconcileAddressSet(key string) error {
 			return fmt.Errorf("failed to get selected namespaces for address set %s: %v", key, err)
 		}
 		var pods []*corev1.Pod
-		if matchedNamespaces.all {
+		if matchedNamespaces == nil {
 			// no namespace selector, use pod selector only
 			if psAddrSet.podSelector.Empty() {
 				// all cluster pods
@@ -716,7 +711,7 @@ func (m *AddressSetManager) reconcileAddressSet(key string) error {
 			}
 		} else {
 			// namespace selector is set, apply pod selector in every namespace
-			for ns := range matchedNamespaces.set {
+			for ns := range matchedNamespaces {
 				if psAddrSet.podSelector.Empty() {
 					// empty selector means no filtering, select all pods in a given namespace
 					nsPods, err := m.podLister.Pods(ns).List(labels.Everything())
@@ -760,7 +755,7 @@ func (m *AddressSetManager) reconcileAddressSet(key string) error {
 			// update m.hostNetworkSelectingAddrSets
 			m.hostNetworkNamespaceLock.Lock()
 			if m.hostNetworkNamespaceExists {
-				if matchedNamespaces.Has(config.Kubernetes.HostNetworkNamespace) {
+				if matchedNamespaces == nil || matchedNamespaces.Has(config.Kubernetes.HostNetworkNamespace) {
 					for _, hostnetIPs := range m.hostNetworkNamespaceIPsPerNode {
 						ips = append(ips, hostnetIPs...)
 					}
@@ -783,28 +778,16 @@ func (m *AddressSetManager) reconcileAddressSet(key string) error {
 	})
 }
 
-type selectedNamespaces struct {
-	set sets.Set[string]
-	// if true, it means all namespaces are selected, so set won't be populated
-	all bool
-}
-
-func (s *selectedNamespaces) Has(namespace string) bool {
-	return s.all || s.set.Has(namespace)
-}
-
 // getSelectedNamespaces returns a set of namespaces that should be selected for a given podSelectorAddressSet.
 // nil set means no namespace selector is set and all namespaces match.
-func (m *AddressSetManager) getSelectedNamespaces(s *podSelectorAddressSet) (*selectedNamespaces, error) {
-	matchedNamespaces := &selectedNamespaces{
-		set: sets.New[string](),
-	}
+func (m *AddressSetManager) getSelectedNamespaces(s *podSelectorAddressSet) (sets.Set[string], error) {
+	matchedNamespaces := sets.New[string]()
 	if s.namespace != "" {
 		// static namespace case
-		matchedNamespaces.set.Insert(s.namespace)
+		matchedNamespaces.Insert(s.namespace)
 	} else if s.namespaceSelector.Empty() {
 		// any namespace
-		matchedNamespaces.all = true
+		matchedNamespaces = nil
 	} else {
 		// selected namespaces
 		namespaces, err := m.namespaceLister.List(s.namespaceSelector)
@@ -812,7 +795,7 @@ func (m *AddressSetManager) getSelectedNamespaces(s *podSelectorAddressSet) (*se
 			return nil, fmt.Errorf("failed to list namespaces: %v", err)
 		}
 		for _, ns := range namespaces {
-			matchedNamespaces.set.Insert(ns.Name)
+			matchedNamespaces.Insert(ns.Name)
 		}
 	}
 	return matchedNamespaces, nil
