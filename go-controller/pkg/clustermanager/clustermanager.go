@@ -28,7 +28,6 @@ import (
 	udntemplate "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
 	vtepcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/vtep"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
-	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
 	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
 	rainformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
 	vtepinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
@@ -47,7 +46,7 @@ import (
 type ClusterManager struct {
 	client                      clientset.Interface
 	defaultNetClusterController *networkClusterController
-	nodeController              *nodecontroller.NodeController
+	nodeController              *clusterManagerNodeController
 	zoneClusterController       *zoneClusterController
 	wf                          *factory.WatchFactory
 	udnClusterManager           *userDefinedNetworkClusterManager
@@ -88,18 +87,27 @@ func NewClusterManager(
 ) (*ClusterManager, error) {
 
 	wf = wf.ShallowClone()
-	cm := &ClusterManager{
-		client:         ovnClient.KubeClient,
-		wf:             wf,
-		recorder:       recorder,
-		identity:       identity,
-		networkManager: networkmanager.Default(),
+	nodeController := newClusterManagerNodeController(wf)
+	defaultNetClusterController := newDefaultNetworkClusterController(&util.DefaultNetInfo{}, ovnClient, wf, recorder, nodeController)
+
+	zoneClusterController, err := newZoneClusterController(ovnClient, wf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zone cluster controller, err : %w", err)
 	}
 
-	var (
-		err                 error
-		tunnelKeysAllocator *id.TunnelKeysAllocator
-	)
+	cm := &ClusterManager{
+		client:                      ovnClient.KubeClient,
+		defaultNetClusterController: defaultNetClusterController,
+		nodeController:              nodeController,
+		zoneClusterController:       zoneClusterController,
+		wf:                          wf,
+		recorder:                    recorder,
+		identity:                    identity,
+		statusManager:               status_manager.NewStatusManager(wf, ovnClient),
+	}
+
+	cm.networkManager = networkmanager.Default()
+	var tunnelKeysAllocator *id.TunnelKeysAllocator
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		// tunnelKeysAllocator is now only used for NAD tunnel keys allocation, but will be reused
 		// for Connecting UDNs. So we initialize it here and pass it to the networkManager.
@@ -114,20 +122,7 @@ func NewClusterManager(
 		if err != nil {
 			return nil, err
 		}
-	}
-	cm.statusManager = status_manager.NewStatusManager(wf, ovnClient, cm.networkManager.Interface())
 
-	nodeController := nodecontroller.NewController(wf, "clustermanager-node", cm.networkManager.Interface())
-	defaultNetClusterController := newDefaultNetworkClusterController(&util.DefaultNetInfo{}, ovnClient, wf, recorder, nodeController)
-	zoneClusterController, err := newZoneClusterController(ovnClient, wf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zone cluster controller, err : %w", err)
-	}
-	cm.defaultNetClusterController = defaultNetClusterController
-	cm.nodeController = nodeController
-	cm.zoneClusterController = zoneClusterController
-
-	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		cm.udnClusterManager, err = newUserDefinedNetworkClusterManager(ovnClient, wf, cm.networkManager.Interface(), recorder, nodeController)
 		if err != nil {
 			return nil, err
