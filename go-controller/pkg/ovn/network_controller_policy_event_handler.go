@@ -25,7 +25,7 @@ import (
 // and resource-specific extra parameters (used now for network-policy-dependant types).
 // newNetpolRetryFramework is also called directly by the watchers that are
 // dynamically created when a network policy is added:
-// LocalPodSelectorType
+// PeerNamespaceSelectorType, LocalPodSelectorType
 func (bnc *BaseNetworkController) newNetpolRetryFramework(
 	objectType reflect.Type,
 	syncFunc func([]interface{}) error,
@@ -78,6 +78,11 @@ func (h *networkControllerPolicyEventHandler) AreResourcesEqual(_, _ interface{}
 		// For these types, there was no old vs new obj comparison in the original update code,
 		// so pretend they're always different so that the update code gets executed
 		return false, nil
+
+	case factory.PeerNamespaceSelectorType: //
+		// For these types there is no update code, so pretend old and new
+		// objs are always equivalent and stop processing the update event.
+		return true, nil
 	}
 
 	return false, fmt.Errorf("no object comparison for type %s", h.objType)
@@ -105,6 +110,9 @@ func (h *networkControllerPolicyEventHandler) GetResourceFromInformerCache(key s
 	case factory.LocalPodSelectorType:
 		obj, err = h.watchFactory.GetPod(namespace, name)
 
+	case factory.PeerNamespaceSelectorType:
+		obj, err = h.watchFactory.GetNamespace(name)
+
 	default:
 		err = fmt.Errorf("object type %s not supported, cannot retrieve it from informers cache",
 			h.objType)
@@ -117,6 +125,10 @@ func (h *networkControllerPolicyEventHandler) GetResourceFromInformerCache(key s
 // Given an object to add and a boolean specifying if the function was executed from iterateRetryResources
 func (h *networkControllerPolicyEventHandler) AddResource(obj interface{}, _ bool) error {
 	switch h.objType {
+	case factory.PeerNamespaceSelectorType:
+		extraParameters := h.extraParameters.(*NetworkPolicyExtraParameters)
+		return h.bnc.handlePeerNamespaceSelectorAdd(extraParameters.np, extraParameters.gp, obj)
+
 	case factory.LocalPodSelectorType:
 		extraParameters := h.extraParameters.(*NetworkPolicyExtraParameters)
 		return h.bnc.handleLocalPodSelectorAddFunc(
@@ -156,6 +168,10 @@ func (h *networkControllerPolicyEventHandler) UpdateResource(_, newObj interface
 // used for now for pods and network policies.
 func (h *networkControllerPolicyEventHandler) DeleteResource(obj, _ interface{}) error {
 	switch h.objType {
+	case factory.PeerNamespaceSelectorType:
+		extraParameters := h.extraParameters.(*NetworkPolicyExtraParameters)
+		return h.bnc.handlePeerNamespaceSelectorDel(extraParameters.np, extraParameters.gp, obj)
+
 	case factory.LocalPodSelectorType:
 		extraParameters := h.extraParameters.(*NetworkPolicyExtraParameters)
 		return h.bnc.handleLocalPodSelectorDelFunc(
@@ -175,7 +191,8 @@ func (h *networkControllerPolicyEventHandler) SyncFunc(objs []interface{}) error
 		syncFunc = h.syncFunc
 	} else {
 		switch h.objType {
-		case factory.LocalPodSelectorType:
+		case factory.LocalPodSelectorType,
+			factory.PeerNamespaceSelectorType:
 			syncFunc = nil
 
 		default:
