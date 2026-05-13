@@ -518,9 +518,7 @@ func (oc *DefaultNetworkController) ReconcileNode(oldNode, newNode *corev1.Node,
 			_, failed = oc.mgmtPortFailed.Load(newNode.Name)
 			mgmtSync := failed || defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState)
 			_, failed = oc.gatewaysFailed.Load(newNode.Name)
-			gwSync := failed || gatewayChanged(oldNode, newNode, oldState, newState, oc.GetNetworkName()) ||
-				nodeChassisChanged(oldNode, newNode) ||
-				defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState) ||
+			gwSync := failed || gatewayChanged(oldNode, newNode) || defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState) ||
 				hostCIDRsChanged(oldNode, newNode) || nodeGatewayMTUSupportChanged(oldNode, newNode)
 			_, hoSync := oc.hybridOverlayFailed.Load(newNode.Name)
 			_, syncZoneIC := oc.syncZoneICFailed.Load(newNode.Name)
@@ -580,24 +578,12 @@ func (oc *DefaultNetworkController) ReconcileNode(oldNode, newNode *corev1.Node,
 	}
 
 	_, syncHostNetAddrSet := oc.syncHostNetAddrSetFailed.Load(newNode.Name)
-	hostNamespaceAddressesChanged := oldNode != nil &&
-		(defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState) ||
-			gatewayChanged(oldNode, newNode, oldState, newState, oc.GetNetworkName()))
-	if oldNode == nil || syncHostNetAddrSet || hostNamespaceAddressesChanged {
-		hostNamespaceAddrSetErr := false
-		if hostNamespaceAddressesChanged {
-			if err := oc.delIPFromHostNetworkNamespaceAddrSet(oldNode); err != nil {
-				klog.Errorf("Failed to delete old node IPs from %s address_set: %v", config.Kubernetes.HostNetworkNamespace, err)
-				hostNamespaceAddrSetErr = true
-				oc.syncHostNetAddrSetFailed.Store(newNode.Name, true)
-				aggregatedErrors = append(aggregatedErrors, err)
-			}
-		}
+	if oldNode == nil || syncHostNetAddrSet {
 		if err := oc.addIPToHostNetworkNamespaceAddrSet(newNode); err != nil {
 			klog.Errorf("Failed to add node IPs to %s address_set: %v", config.Kubernetes.HostNetworkNamespace, err)
 			oc.syncHostNetAddrSetFailed.Store(newNode.Name, true)
 			aggregatedErrors = append(aggregatedErrors, err)
-		} else if !hostNamespaceAddrSetErr {
+		} else {
 			oc.syncHostNetAddrSetFailed.Delete(newNode.Name)
 		}
 	}

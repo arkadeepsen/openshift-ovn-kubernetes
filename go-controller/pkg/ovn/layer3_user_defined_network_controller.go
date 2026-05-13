@@ -661,8 +661,7 @@ func (oc *Layer3UserDefinedNetworkController) ReconcileNode(oldNode, newNode *co
 			syncZoneIC = syncZoneIC || zoneClusterChanged
 			_, failed = oc.gatewaysFailed.Load(newNode.Name)
 			syncGw := failed ||
-				gatewayChanged(oldNode, newNode, oldState, newState, oc.GetNetworkName()) ||
-				nodeChassisChanged(oldNode, newNode) ||
+				gatewayChanged(oldNode, newNode) ||
 				nodeSubnetChange ||
 				hostCIDRsChanged(oldNode, newNode) ||
 				nodeGatewayMTUSupportChanged(oldNode, newNode)
