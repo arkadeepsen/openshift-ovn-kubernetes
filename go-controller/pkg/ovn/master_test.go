@@ -28,7 +28,6 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 	egressfirewallfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned/fake"
 	egressipfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned/fake"
@@ -42,6 +41,7 @@ import (
 	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
 	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
 	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
@@ -516,7 +516,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			err = oc.StartClusterMaster("master")
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			startDefaultNodeController(oc)
+			oc.WatchNodes()
 
 			wg.Add(1)
 			go func() {
@@ -619,7 +619,7 @@ var _ = ginkgo.Describe("Master Operations", func() {
 			err = oc.StartClusterMaster("master")
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			startDefaultNodeController(oc)
+			oc.WatchNodes()
 
 			wg.Add(1)
 			go func() {
@@ -781,7 +781,7 @@ subnet=%s
 			_, _ = oc.joinSwIPManager.ensureJoinLRPIPs(types.OVNClusterRouter)
 
 			// Let the real code run and ensure OVN database sync
-			startDefaultNodeController(oc)
+			oc.WatchNodes()
 
 			gomega.Expect(fexec.CalledMatchesExpected()).To(gomega.BeTrue(), fexec.ErrorDesc)
 
@@ -805,19 +805,11 @@ func startFakeController(oc *DefaultNetworkController, wg *sync.WaitGroup) []*ne
 		clusterSubnets = append(clusterSubnets, clusterEntry.CIDR)
 	}
 
-	startDefaultNodeController(oc)
+	// Let the real code run and ensure OVN database sync
+	gomega.Expect(oc.WatchNodes()).To(gomega.Succeed())
 	gomega.Expect(oc.StartServiceController(wg, false)).To(gomega.Succeed())
 
 	return clusterSubnets
-}
-
-func startDefaultNodeController(oc *DefaultNetworkController) {
-	gomega.Expect(oc.startNodeReconciliation()).To(gomega.Succeed())
-	ginkgo.DeferCleanup(func() {
-		if oc.nodeReconciler != nil {
-			oc.nodeReconciler.Stop()
-		}
-	})
 }
 
 var _ = ginkgo.Describe("Default network controller operations", func() {
@@ -1020,9 +1012,6 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 
 	ginkgo.AfterEach(func() {
 		libovsdbCleanup.Cleanup()
-		if oc != nil && oc.nodeReconciler != nil {
-			oc.nodeReconciler.Stop()
-		}
 		close(stopChan)
 		f.Shutdown()
 		close(recorder.Events)
@@ -1042,6 +1031,18 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = oc.syncNodeGateway(testNode)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			retry.InitRetryObjWithAdd(testNode, testNode.Name, oc.retryNodes)
+			gomega.Expect(retry.RetryObjsLen(oc.retryNodes)).To(gomega.Equal(1))
+
+			retry.CheckRetryObjectMultipleFieldsEventually(
+				testNode.Name,
+				oc.retryNodes,
+				gomega.BeNil(),             // oldObj should be nil
+				gomega.Not(gomega.BeNil()), // newObj should not be nil
+			)
+
+			retry.DeleteRetryObj(testNode.Name, oc.retryNodes)
+			gomega.Expect(retry.CheckRetryObj(testNode.Name, oc.retryNodes)).To(gomega.BeFalse())
 
 			skipSnat := false
 			expectedNBDatabaseState = addNodeLogicalFlowsWithServiceController(nil, expectedOVNClusterRouter, expectedNodeSwitch,
@@ -1179,13 +1180,8 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				err = condition(oc)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				startDefaultNodeController(oc)
-				gomega.Eventually(func() error {
-					_, err := libovsdbops.GetLogicalRouter(nbClient, &nbdb.LogicalRouter{
-						Name: types.GWRouterPrefix + node1.Name,
-					})
-					return err
-				}).Should(gomega.Succeed())
+				// Let the real code run and ensure OVN database sync
+				gomega.Expect(oc.WatchNodes()).To(gomega.Succeed())
 
 				// add stale SNATs from pods to nodes on wrong node
 				GR := &nbdb.LogicalRouter{
@@ -1373,16 +1369,23 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = nodeAnnotator.Run()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			ginkgo.By("waiting for the gateway update retry path to observe the failed update")
-			gomega.Eventually(func() bool {
-				_, failed := oc.gatewaysFailed.Load(node1.Name)
-				return failed
-			}, config.Default.OVSDBTxnTimeout+time.Second).Should(gomega.BeTrue())
+			ginkgo.By("update should have failed with a retry being present")
+			// check to see if the retry cache has an entry for this node
+			// In the retry entry, old obj should be nil, new obj should not be nil
+			retry.CheckRetryObjectMultipleFieldsEventually(
+				testNode.Name,
+				oc.retryNodes,
+				gomega.BeNil(),             // oldObj should be nil
+				gomega.Not(gomega.BeNil()), // newObj should not be nil
+			)
 			connCtx, cancel := context.WithTimeout(context.Background(), config.Default.OVSDBTxnTimeout)
 			defer cancel()
 			ginkgo.By("bring up NBDB")
 			resetNBClient(connCtx, oc.nbClient)
-			oc.nodeReconciler.ReconcileNetwork(node1.Name, oc.GetNetworkName())
+			retry.SetRetryObjWithNoBackoff(node1.Name, oc.retryNodes)
+			oc.retryNodes.RequestRetryObjs() // retry the failed entry
+			ginkgo.By("should be no retry entry after update completes")
+			retry.CheckRetryObjectEventually(testNode.Name, false, oc.retryNodes)
 			for _, data := range expectedNBDatabaseState {
 				if route, ok := data.(*nbdb.LogicalRouterStaticRoute); ok {
 					if route.Nexthop == "172.16.16.1" {
@@ -1426,29 +1429,28 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			err = fakeClient.KubeClient.CoreV1().Nodes().Delete(context.TODO(), testNode.Name, metav1.DeleteOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			gomega.Eventually(func() []string {
-				eventsLock.Lock()
-				defer eventsLock.Unlock()
-				eventsCopy := make([]string, 0, len(events))
-				eventsCopy = append(eventsCopy, events...)
-				return eventsCopy
-			}, config.Default.OVSDBTxnTimeout+time.Second).Should(gomega.ContainElement(
-				gomega.ContainSubstring("error deleting node node1 logical network"),
-			))
+			// sleep long enough for TransactWithRetry to fail, causing LS (and other rows related to node) delete to fail
+			time.Sleep(config.Default.OVSDBTxnTimeout + time.Second)
 
-			ginkgo.By("node resources should still exist while delete reconciliation is failing")
-			_, err = libovsdbops.GetLogicalSwitch(nbClient, &nbdb.LogicalSwitch{Name: node1.Name})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			// check the retry entry for this node
+			ginkgo.By("retry entry: old obj should not be nil, new obj should be nil")
+			retry.CheckRetryObjectMultipleFieldsEventually(
+				testNode.Name,
+				oc.retryNodes,
+				gomega.Not(gomega.BeNil()), // oldObj should not be nil
+				gomega.BeNil(),             // newObj should be nil
+			)
 
 			// reconnect nbdb
 			connCtx, cancel := context.WithTimeout(context.Background(), config.Default.OVSDBTxnTimeout)
 			defer cancel()
 			resetNBClient(connCtx, oc.nbClient)
-			oc.nodeReconciler.ReconcileNetwork(node1.Name, oc.GetNetworkName())
-			gomega.Eventually(func() bool {
-				_, err := libovsdbops.GetLogicalSwitch(nbClient, &nbdb.LogicalSwitch{Name: node1.Name})
-				return errors.Is(err, libovsdbclient.ErrNotFound)
-			}).Should(gomega.BeTrue())
+
+			// reset backoff for immediate retry
+			retry.SetRetryObjWithNoBackoff(node1.Name, oc.retryNodes)
+			oc.retryNodes.RequestRetryObjs() // retry the failed entry
+
+			retry.CheckRetryObjectEventually(testNode.Name, false, oc.retryNodes)
 			return nil
 		}
 
@@ -1467,16 +1469,21 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				_, err := config.InitConfig(ctx, nil, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				startFakeController(oc, wg)
-				ginkgo.By("create new node with no annotation defined and ensure reconciliation fails")
+				ginkgo.By("create new node with no annotation defined and ensure there's a retry entry")
 				_, err = kubeFakeClient.CoreV1().Nodes().Create(context.TODO(), node, metav1.CreateOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				gomega.Eventually(func() bool {
-					_, failed := oc.addNodeFailed.Load(node.Name)
-					return failed
-				}).Should(gomega.BeTrue())
+				retry.CheckRetryObjectMultipleFieldsEventually(
+					node.Name,
+					oc.retryNodes,
+					gomega.BeNil(),             // oldObj should be nil
+					gomega.Not(gomega.BeNil()), // newObj should not be nil
+				)
+				keyExists := true
+				retry.CheckRetryObjectEventually(node.Name, keyExists, oc.retryNodes)
 				ginkgo.By("delete node and check that there are no retries for the deleted node")
 				err = kubeFakeClient.CoreV1().Nodes().Delete(context.TODO(), node.Name, metav1.DeleteOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				retry.CheckRetryObjectEventually(node.Name, !keyExists, oc.retryNodes)
 				ginkgo.By("ensure failures for sync host network address or adding nodes are cleared")
 				gomega.Eventually(func() bool {
 					_, foundSyncHostNetAddrSetFailed := oc.syncHostNetAddrSetFailed.Load(node.Name)
@@ -1559,10 +1566,8 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				return errors.Is(err, libovsdbclient.ErrNotFound)
 			}, 10).Should(gomega.BeTrue())
 
-			gomega.Eventually(func() bool {
-				_, failed := oc.addNodeFailed.Load(testNode.Name)
-				return failed
-			}).Should(gomega.BeFalse())
+			// check the retry entry for this node
+			retry.CheckRetryObjectEventually(testNode.Name, false, oc.retryNodes)
 			return nil
 		}
 
@@ -1586,38 +1591,19 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				MatchLabels: nodeNoHostSubnetAnnotation(),
 			})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			atomic.StoreUint32(&oc.allInitialPodsProcessed, 1)
 
-			startDefaultNodeController(oc)
-
-			badNode := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "ho-node",
-					Annotations: map[string]string{
-						util.OvnNodeID: "3",
-					},
-				},
-			}
-			_, err = fakeClient.KubeClient.CoreV1().Nodes().Create(context.TODO(), badNode, metav1.CreateOptions{})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Eventually(func() bool {
-				_, failed := oc.addNodeFailed.Load(badNode.Name)
-				return failed
-			}).Should(gomega.BeTrue())
-
+			gomega.Expect(
+				oc.retryNodes.ResourceHandler.AddResource(
+					&testNode, false)).To(
+				gomega.MatchError(
+					"[nodeAdd: error adding node \"node1\": could not find \"k8s.ovn.org/node-subnets\" annotation, error parsing annotation for node node1: could not find \"k8s.ovn.org/node-subnets\" annotation]"))
 			ginkgo.By("labeling the node to a hybrid overlay node")
-			badNode, err = fakeClient.KubeClient.CoreV1().Nodes().Get(context.TODO(), badNode.Name, metav1.GetOptions{})
+			testNode.Labels = nodeNoHostSubnetAnnotation()
+			_, err = fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), &testNode, metav1.UpdateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			badNode.Labels = nodeNoHostSubnetAnnotation()
-			badNode.Annotations[hotypes.HybridOverlayNodeSubnet] = "11.1.0.0/24"
-			_, err = fakeClient.KubeClient.CoreV1().Nodes().Update(context.TODO(), badNode, metav1.UpdateOptions{})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			oc.nodeReconciler.ReconcileNetwork(badNode.Name, oc.GetNetworkName())
 
 			ginkgo.By("adding the node becomes possible")
-			gomega.Eventually(func() bool {
-				return oc.lsManager.IsNonHostSubnetSwitch(badNode.Name)
-			}).Should(gomega.BeTrue())
+			gomega.Eventually(oc.retryNodes.ResourceHandler.AddResource).WithArguments(&testNode, false).Should(gomega.Succeed())
 
 			return nil
 		}
@@ -1648,10 +1634,10 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				},
 			}
 
-			startFakeController(oc, wg)
-
 			_, err = kubeFakeClient.CoreV1().Nodes().Create(context.TODO(), newNode, metav1.CreateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			startFakeController(oc, wg)
 
 			// check that a node event complaining about the mismatch between
 			// node subnets and cluster subnets was posted
@@ -1710,10 +1696,10 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 				},
 			}
 
-			startFakeController(oc, wg)
-
 			_, err = kubeFakeClient.CoreV1().Nodes().Create(context.TODO(), newNode, metav1.CreateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			startFakeController(oc, wg)
 
 			// Simulate the ClusterManager reconciling the node annotations to dual-stack
 			newNode, err = kubeFakeClient.CoreV1().Nodes().Get(context.TODO(), newNode.Name, metav1.GetOptions{})
@@ -1747,38 +1733,6 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			app.Name,
 			"-cluster-subnets=" + clusterCIDR + "," + clusterv6CIDR,
 			"-k8s-service-cidr=10.96.0.0/16,fd00:10:96::/112",
-			"--init-gateways",
-			"--nodeport",
-		})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	})
-
-	ginkgo.It("reconciles a bootstrap local node when only syncZoneICFailed is marked", func() {
-		app.Action = func(ctx *cli.Context) error {
-			_, err := config.InitConfig(ctx, nil, nil)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-			oc.syncZoneICFailed.Store(testNode.Name, true)
-			gomega.Expect(oc.lsManager.GetSwitchSubnets(testNode.Name)).To(gomega.BeNil())
-
-			startDefaultNodeController(oc)
-
-			gomega.Eventually(func() []*net.IPNet {
-				return oc.lsManager.GetSwitchSubnets(testNode.Name)
-			}).ShouldNot(gomega.BeNil())
-			gomega.Eventually(func() error {
-				_, err := libovsdbops.GetLogicalRouter(nbClient, &nbdb.LogicalRouter{
-					Name: types.GWRouterPrefix + node1.Name,
-				})
-				return err
-			}).Should(gomega.Succeed())
-
-			return nil
-		}
-
-		err := app.Run([]string{
-			app.Name,
-			"-cluster-subnets=" + clusterCIDR,
 			"--init-gateways",
 			"--nodeport",
 		})
@@ -1839,7 +1793,8 @@ var _ = ginkgo.Describe("Default network controller operations", func() {
 			fakeOvn.controller.zone = "node1"
 
 			gomega.Expect(fakeOvn.controller.WatchNamespaces()).To(gomega.Succeed(), "Namespace should be created fine")
-			startDefaultNodeController(fakeOvn.controller)
+			err = fakeOvn.controller.WatchNodes()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Check whether the address_set is empty after HostNetworkNamespace addition
 			fakeOvn.asf.EventuallyExpectEmptyAddressSetExist(config.Kubernetes.HostNetworkNamespace)

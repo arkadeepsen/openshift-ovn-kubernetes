@@ -230,9 +230,6 @@ func (o *FakeOVN) shutdown() {
 	if o.udnNodeController != nil {
 		o.udnNodeController.Stop()
 	}
-	if o.controller != nil && o.controller.nodeReconciler != nil {
-		o.controller.nodeReconciler.Stop()
-	}
 	o.watcher.Shutdown()
 	close(o.stopChan)
 	o.controller.cancelableCtx.Cancel()
@@ -319,7 +316,6 @@ func (o *FakeOVN) init(nadList []nettypes.NetworkAttachmentDefinition) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	o.controller.multicastSupport = config.EnableMulticast
 	o.eIPController.zone = o.controller.zone
-	o.udnNodeController = o.controller.nodeReconciler
 
 	setupCOPP := false
 	setupClusterController(o.controller, setupCOPP)
@@ -334,8 +330,10 @@ func (o *FakeOVN) init(nadList []nettypes.NetworkAttachmentDefinition) {
 	err = o.addressSetManager.Start()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	err = o.udnNodeController.Start()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	if o.udnNodeController != nil {
+		err = o.udnNodeController.Start()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
 
 	err = o.networkManager.Start()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -495,8 +493,7 @@ func NewOvnController(
 		return nil, err
 	}
 
-	nodeReconciler := nodecontroller.NewNodeController(wf, networkManager)
-	dnc, err := newDefaultNetworkControllerCommon(cnci, stopChan, wg, addressSetFactory, networkManager, nil, nil, eIPController, portCache, addressSetManager, nodeReconciler)
+	dnc, err := newDefaultNetworkControllerCommon(cnci, stopChan, wg, addressSetFactory, networkManager, nil, nil, eIPController, portCache, addressSetManager)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	if nbZoneFailed {
@@ -584,6 +581,10 @@ func (o *FakeOVN) NewUserDefinedNetworkController(netattachdef *nettypes.Network
 	topoType := nInfo.TopologyType()
 	_, ok = o.userDefinedNetworkControllers[netName]
 	if !ok {
+		if o.udnNodeController == nil {
+			o.udnNodeController = nodecontroller.NewNodeController(o.watcher, o.networkManager.Interface())
+		}
+
 		nbZoneFailed := false
 		// Try to get the NBZone.  If there is an error, create NB_Global record.
 		// Otherwise NewCommonNetworkControllerInfo() will return error since it

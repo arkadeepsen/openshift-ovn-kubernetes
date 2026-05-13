@@ -342,7 +342,8 @@ var _ = ginkgo.Describe("OVN MultiNetworkPolicy Operations", func() {
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
-			startDefaultNodeController(fakeOvn.controller)
+			err = fakeOvn.controller.WatchNodes()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		if namespaces != nil {

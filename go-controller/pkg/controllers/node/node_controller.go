@@ -47,7 +47,7 @@ type NodeHandler interface {
 // This will change in the future.
 type NetworkFilteringPolicy interface {
 	NodeHasNetwork(nodeName, netName string) bool
-	ShouldFilterByRemoteNetworkActivity(node *corev1.Node, netName string) bool
+	ShouldFilterByRemoteNetworkActivity(node *corev1.Node) bool
 }
 
 // NodeController reconciles node topology for all registered networks.
@@ -61,8 +61,7 @@ type NodeController struct {
 	// handlers maps network name to node handler.
 	handlers *syncmap.SyncMap[NodeHandler]
 
-	// stateMu protects nodeReconciliation, nodeActive, nodeNetworks, nodeCache,
-	// and latestInformerNodeCache.
+	// stateMu protects nodeReconciliation, nodeActive, nodeNetworks, and nodeCache.
 	stateMu sync.RWMutex
 	// nodeReconciliation tracks nodes that should be treated as "new" per network.
 	// keyed by network -> nodes
@@ -79,11 +78,6 @@ type NodeController struct {
 	// nodeCache contains configured node state
 	// keyed by network -> nodeName
 	nodeCache map[string]map[string]*corev1.Node
-	// latestInformerNodeCache contains the latest informer object seen for a node
-	// even if reconciliation failed. It is only used as a delete fallback when
-	// no configured node state exists in nodeCache.
-	// keyed by network -> nodeName
-	latestInformerNodeCache map[string]map[string]*corev1.Node
 	// annotationCache stores parsed annotation maps keyed by node.
 	annotationCache *NodeAnnotationCache
 
@@ -100,16 +94,15 @@ func NewController(wf *factory.WatchFactory, name string, policy NetworkFilterin
 	}
 	nodeInformer := wf.NodeCoreInformer()
 	c := &NodeController{
-		name:                    name,
-		policy:                  policy,
-		nodeLister:              nodeInformer.Lister(),
-		handlers:                syncmap.NewSyncMap[NodeHandler](),
-		nodeReconciliation:      map[string]map[string]bool{},
-		nodeActive:              map[string]map[string]struct{}{},
-		nodeNetworks:            map[string]map[string]struct{}{},
-		nodeCache:               map[string]map[string]*corev1.Node{},
-		latestInformerNodeCache: map[string]map[string]*corev1.Node{},
-		annotationCache:         NewNodeAnnotationCache(),
+		name:               name,
+		policy:             policy,
+		nodeLister:         nodeInformer.Lister(),
+		handlers:           syncmap.NewSyncMap[NodeHandler](),
+		nodeReconciliation: map[string]map[string]bool{},
+		nodeActive:         map[string]map[string]struct{}{},
+		nodeNetworks:       map[string]map[string]struct{}{},
+		nodeCache:          map[string]map[string]*corev1.Node{},
+		annotationCache:    NewNodeAnnotationCache(),
 	}
 
 	nodeControllerConfig := &controller.ControllerConfig[corev1.Node]{
@@ -128,7 +121,7 @@ func NewController(wf *factory.WatchFactory, name string, policy NetworkFilterin
 
 // NewNodeController builds a controller that handles node events for all UDNs.
 func NewNodeController(wf *factory.WatchFactory, networkManager networkmanager.Interface) *NodeController {
-	return NewController(wf, "node-topology", &udnPolicy{networkManager: networkManager})
+	return NewController(wf, "udn-node-topology", &udnPolicy{networkManager: networkManager})
 }
 
 // Start starts the node worker.
@@ -205,7 +198,6 @@ func (c *NodeController) DeregisterNetworkController(netName string) {
 		}
 		delete(c.nodeActive, key)
 		delete(c.nodeCache, key)
-		delete(c.latestInformerNodeCache, key)
 		c.stateMu.Unlock()
 		return nil
 	})
@@ -257,18 +249,17 @@ func (c *NodeController) reconcileNode(key string) error {
 		nodeHadNetwork := c.nodeHasNetwork(netName, nodeName)
 		nodeHasNetwork := c.policy.NodeHasNetwork(nodeName, netName)
 
-		if c.shouldFilterByRemoteNetworkActivity(newNode, netName) || c.shouldFilterByRemoteNetworkActivity(oldNode, netName) {
+		if c.shouldFilterByRemoteNetworkActivity(newNode) || c.shouldFilterByRemoteNetworkActivity(oldNode) {
 			// If the node is going inactive we need to delete it and not update
 			if nodeHadNetwork && !nodeHasNetwork {
 				needsAddUpdate = false
 				needsDelete = true
 				c.markNodeNeedsDeleteReconciliation(netName, nodeName)
 				c.deleteNodeActive(netName, nodeName)
-				// If we have no configured node in cache, retain the latest informer object
-				// so delete reconciliation has the metadata needed for cleanup.
+				// if we have no oldNode in the cache, and we are going inactive here, then populate the cache
 				if newNode != nil && oldNode == nil {
 					oldNode = newNode
-					c.setLatestInformerNode(netName, oldNode)
+					c.setCachedNode(netName, oldNode)
 				}
 			} else if !nodeHadNetwork && nodeHasNetwork {
 				// node going active, but do not purge delete state (may need to retry previous failed delete)
@@ -313,11 +304,7 @@ func (c *NodeController) reconcileNode(key string) error {
 // newNode is the latest state of the node from informer cache.
 // Reconciliation is level-driven.
 func (c *NodeController) reconcileUpdate(handler NodeHandler, oldNode, newNode *corev1.Node, netName string, oldState, newState *NodeAnnotationState) error {
-	err := handler.ReconcileNode(oldNode, newNode, oldState, newState)
-	// Preserve the latest informer object for delete cleanup without
-	// overwriting the last successfully applied node state.
-	c.setLatestInformerNode(netName, newNode)
-	if err != nil {
+	if err := handler.ReconcileNode(oldNode, newNode, oldState, newState); err != nil {
 		return err
 	}
 
@@ -330,12 +317,6 @@ func (c *NodeController) reconcileUpdate(handler NodeHandler, oldNode, newNode *
 
 // reconcileDelete handles deletion using cached state.
 func (c *NodeController) reconcileDelete(handler NodeHandler, nodeName, netName string, oldNode *corev1.Node, oldState *NodeAnnotationState) error {
-	if oldNode == nil {
-		oldNode = c.getLatestInformerNode(netName, nodeName)
-		oldState = c.annotationCache.updateNodeAnnotationState(oldNode, false)
-	}
-	// if there is no cached node (previously configured) or no informer cached node
-	// then we create a dummy node to at least attempt some best-effort cleanup
 	if oldNode == nil {
 		oldNode = &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
@@ -351,7 +332,6 @@ func (c *NodeController) reconcileDelete(handler NodeHandler, nodeName, netName 
 	c.deleteNodeActive(netName, nodeName)
 	c.clearNodeDeleteReconciliation(netName, nodeName)
 	c.deleteCachedNode(netName, nodeName)
-	c.deleteLatestInformerNode(netName, nodeName)
 
 	// We delete nodes per network, so we need to clear global caches when no networks reference it anymore.
 	// A cheap trick to do this is to leverage a map that is referenced by network.
@@ -545,8 +525,8 @@ func (c *NodeController) deleteNodeActive(netName, nodeName string) {
 // shouldFilterByRemoteNetworkActivity returns true when dynamic UDN activity
 // filtering should be applied for the node. This is limited to remote-zone
 // nodes; local-zone nodes always run unfiltered reconciliation.
-func (c *NodeController) shouldFilterByRemoteNetworkActivity(node *corev1.Node, netName string) bool {
-	return c.policy.ShouldFilterByRemoteNetworkActivity(node, netName)
+func (c *NodeController) shouldFilterByRemoteNetworkActivity(node *corev1.Node) bool {
+	return c.policy.ShouldFilterByRemoteNetworkActivity(node)
 }
 
 type udnPolicy struct {
@@ -557,8 +537,8 @@ func (p *udnPolicy) NodeHasNetwork(nodeName, netName string) bool {
 	return p.networkManager.NodeHasNetwork(nodeName, netName)
 }
 
-func (p *udnPolicy) ShouldFilterByRemoteNetworkActivity(node *corev1.Node, netName string) bool {
-	if node == nil || netName == types.DefaultNetworkName || !config.OVNKubernetesFeature.EnableDynamicUDNAllocation {
+func (p *udnPolicy) ShouldFilterByRemoteNetworkActivity(node *corev1.Node) bool {
+	if node == nil || !config.OVNKubernetesFeature.EnableDynamicUDNAllocation {
 		return false
 	}
 	localZone := config.Default.Zone
@@ -615,30 +595,6 @@ func (c *NodeController) setCachedNode(netName string, node *corev1.Node) {
 	c.nodeCache[netName][node.Name] = node.DeepCopy()
 }
 
-func (c *NodeController) getLatestInformerNode(netName, nodeName string) *corev1.Node {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	node := c.latestInformerNodeCache[netName][nodeName]
-	if node == nil {
-		return nil
-	}
-	return node.DeepCopy()
-}
-
-func (c *NodeController) setLatestInformerNode(netName string, node *corev1.Node) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-
-	if c.latestInformerNodeCache == nil {
-		c.latestInformerNodeCache = make(map[string]map[string]*corev1.Node)
-	}
-	if c.latestInformerNodeCache[netName] == nil {
-		c.latestInformerNodeCache[netName] = make(map[string]*corev1.Node)
-	}
-
-	c.latestInformerNodeCache[netName][node.Name] = node.DeepCopy()
-}
-
 // Delete removes a node from the cache.
 func (c *NodeController) deleteCachedNode(netName, nodeName string) {
 	c.stateMu.Lock()
@@ -653,21 +609,5 @@ func (c *NodeController) deleteCachedNode(netName, nodeName string) {
 
 	if len(nodes) == 0 {
 		delete(c.nodeCache, netName)
-	}
-}
-
-func (c *NodeController) deleteLatestInformerNode(netName, nodeName string) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-
-	nodes := c.latestInformerNodeCache[netName]
-	if nodes == nil {
-		return
-	}
-
-	delete(nodes, nodeName)
-
-	if len(nodes) == 0 {
-		delete(c.latestInformerNodeCache, netName)
 	}
 }
