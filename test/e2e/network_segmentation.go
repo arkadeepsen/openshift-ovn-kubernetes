@@ -1175,24 +1175,14 @@ spec:
 				}
 				Expect(found).To(BeTrue(), "NetworkAllocationSucceeded condition should be True when cluster has <= 2 nodes")
 			} else {
+				By("when cluster has > 2 nodes, error is expected")
 				found := false
-				expectedStatus := metav1.ConditionFalse
-				if isDynamicUDNEnabled() {
-					By("when cluster has > 2 nodes with dynamic UDN, no error is expected")
-					expectedStatus = metav1.ConditionTrue
-				} else {
-					By("when cluster has > 2 nodes, error is expected")
-				}
-
 				for _, condition := range actualConditions {
-					if condition.Type == netAllocationCondition && condition.Status == expectedStatus {
+					if condition.Type == netAllocationCondition && condition.Status == metav1.ConditionFalse {
 						found = true
-						break
 					}
 				}
-
-				Expect(found).To(BeTrue(), fmt.Sprintf("NetworkAllocationSucceeded condition should be %s when cluster has > 2 nodes", expectedStatus))
-
+				Expect(found).To(BeTrue(), "NetworkAllocationSucceeded condition should be False when cluster has > 2 nodes")
 				events, err := cs.CoreV1().Events(f.Namespace.Name).List(context.Background(), metav1.ListOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				found = false
@@ -1203,11 +1193,7 @@ spec:
 						break
 					}
 				}
-				if isDynamicUDNEnabled() {
-					Expect(found).To(BeFalse(), "should not have found an event for failed node allocation")
-				} else {
-					Expect(found).To(BeTrue(), "should have found an event for failed node allocation")
-				}
+				Expect(found).To(BeTrue(), "should have found an event for failed node allocation")
 			}
 		})
 	})
@@ -1579,22 +1565,14 @@ spec:
 				}
 				Expect(found).To(BeTrue(), "NetworkAllocationSucceeded condition should be True when cluster has <= 2 nodes")
 			} else {
+				By("when cluster has > 2 nodes, error is expected")
 				found := false
-				expectedStatus := metav1.ConditionFalse
-				if isDynamicUDNEnabled() {
-					By("when cluster has > 2 nodes with dynamic UDN, no error is expected")
-					expectedStatus = metav1.ConditionTrue
-				} else {
-					By("when cluster has > 2 nodes, error is expected")
-				}
-
 				for _, condition := range actualConditions {
-					if condition.Type == netAllocationCondition && condition.Status == expectedStatus {
+					if condition.Type == netAllocationCondition && condition.Status == metav1.ConditionFalse {
 						found = true
-						break
 					}
 				}
-				Expect(found).To(BeTrue(), fmt.Sprintf("NetworkAllocationSucceeded condition should be %s when cluster has > 2 nodes", expectedStatus))
+				Expect(found).To(BeTrue(), "NetworkAllocationSucceeded condition should be False when cluster has > 2 nodes")
 				events, err := cs.CoreV1().Events("").List(context.Background(), metav1.ListOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				found = false
@@ -1605,11 +1583,7 @@ spec:
 						break
 					}
 				}
-				if isDynamicUDNEnabled() {
-					Expect(found).To(BeFalse(), "should not have found an event for failed node allocation")
-				} else {
-					Expect(found).To(BeTrue(), "should have found an event for failed node allocation")
-				}
+				Expect(found).To(BeTrue(), "should have found an event for failed node allocation")
 			}
 		})
 	})
