@@ -25,7 +25,6 @@ import (
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
 	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
-	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
 	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
@@ -38,7 +37,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 		f              *factory.WatchFactory
 		recorder       record.EventRecorder
 		stopChan       chan struct{}
-		nodeController *nodecontroller.NodeController
+		nodeController *clusterManagerNodeController
 		wg             *sync.WaitGroup
 	)
 
@@ -82,7 +81,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 				err = f.Start()
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+				nodeController = newClusterManagerNodeController(f)
 				gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 				sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -154,7 +153,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 					err = f.Start()
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-					nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+					nodeController = newClusterManagerNodeController(f)
 					gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 					sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -195,7 +194,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					gomega.Expect(f.Start()).NotTo(gomega.HaveOccurred())
 
-					nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+					nodeController = newClusterManagerNodeController(f)
 					gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 					sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -258,7 +257,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						err = f.Start()
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -398,7 +397,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 
 				gomega.Eventually(checkNodeAnnotations).ShouldNot(gomega.HaveOccurred())
 
-				nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+				nodeController = newClusterManagerNodeController(f)
 
 				sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -581,7 +580,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 						gomega.Expect(f.Start()).To(gomega.Succeed())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 						gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -638,7 +637,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 						gomega.Expect(f.Start()).To(gomega.Succeed())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 						gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -691,7 +690,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 						gomega.Expect(f.Start()).To(gomega.Succeed())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 						gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -764,7 +763,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 						gomega.Expect(f.Start()).To(gomega.Succeed())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 						gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -840,7 +839,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 						gomega.Expect(f.Start()).To(gomega.Succeed())
 
-						nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+						nodeController = newClusterManagerNodeController(f)
 						gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 						sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
@@ -910,7 +909,7 @@ var _ = ginkgo.Describe("Cluster Controller Manager", func() {
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					gomega.Expect(f.Start()).NotTo(gomega.HaveOccurred())
 
-					nodeController = nodecontroller.NewController(f, "clustermanager-node", networkmanager.Default().Interface())
+					nodeController = newClusterManagerNodeController(f)
 					gomega.Expect(nodeController.Start()).To(gomega.Succeed())
 
 					sncm, err := newUserDefinedNetworkClusterManager(fakeClient, f, networkmanager.Default().Interface(), recorder, nodeController)
