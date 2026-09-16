@@ -6,12 +6,19 @@ import (
 
 	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
 	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
-var deploymentConfig api.DeploymentConfig
+var (
+	deploymentConfig api.DeploymentConfig
+	imageIDMapping   map[api.ImageID]imageutils.ImageID = map[api.ImageID]imageutils.ImageID{
+		images.Agnhost: imageutils.Agnhost,
+	}
+)
 
 func init() {
 	deploymentConfig = openshift{}
@@ -60,12 +67,25 @@ func (m openshift) PrimaryInterfaceName() string {
 	return "enp0s3"
 }
 
-func (m openshift) GetAgnHostContainerImage() string {
-	// use downloadable image for external container.
-	// ref: https://github.com/openshift/release/blob/db6697de61f4ae7e05c5a2db782a87c459e849bf/ci-operator/step-registry/baremetalds/e2e/ovn/bgp/pre/baremetalds-e2e-ovn-bgp-pre-commands.sh#L197
-	return "registry.k8s.io/e2e-test-images/agnhost:2.40"
-}
-
 func (m openshift) IsConfigurationEnabled(config api.Config) bool {
 	return false
+}
+
+func (m openshift) GetImage(imageID api.ImageID) string {
+	return images.GetImageConfigs()[imageID]
+}
+
+func (m openshift) GetRequiredImages() []api.ImageConfig {
+	imageConfigs := []api.ImageConfig{}
+	for _, config := range images.RequiredImages() {
+		newID, ok := imageIDMapping[config.ImageID]
+		if !ok {
+			newID = imageutils.None
+		}
+		imageConfigs = append(imageConfigs, api.ImageConfig{
+			ImageID:  api.ImageID(newID),
+			PullSpec: config.PullSpec,
+		})
+	}
+	return imageConfigs
 }
